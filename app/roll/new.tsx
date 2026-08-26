@@ -15,6 +15,7 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { GreaseRing } from '@/components/GreaseRing';
 import { Button, Label } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
 import { FREE_ROLLS, usePlus } from '@/lib/purchases';
@@ -62,6 +63,14 @@ export default function NewRoll() {
   const [name, setName] = useState('');
   const [exposures, setExposures] = useState<number>(36);
   const [filter, setFilter] = useState('none');
+
+  /**
+   * Which mark is on the sheet.
+   *
+   * A counter, not the filter id: the ring is redrawn per *selection*, so
+   * choosing the same stock twice still puts a new loop around it.
+   */
+  const [mark, setMark] = useState(1);
   const chosen = filterById(filter);
   const [saving, setSaving] = useState(false);
 
@@ -153,7 +162,12 @@ export default function NewRoll() {
             return (
               <Pressable
                 key={f.id}
-                onPress={() => setFilter(f.id)}
+                onPress={() => {
+                  setFilter(f.id);
+                  // A fresh mark each time, including on the one already
+                  // chosen — picking it again is still picking it.
+                  setMark((n) => n + 1);
+                }}
                 accessibilityRole="radio"
                 accessibilityState={{ selected: on }}
                 accessibilityLabel={`${f.label} filter`}
@@ -176,7 +190,11 @@ export default function NewRoll() {
 
                 {/* The keeper, ringed. Drawn outside the frame so the mark sits
                     on the sheet around the picture, not across it. */}
-                {on ? <View style={styles.ring} pointerEvents="none" /> : null}
+                {on ? (
+                  <View style={styles.ringBox} pointerEvents="none">
+                    <GreaseRing seed={mark} />
+                  </View>
+                ) : null}
               </Pressable>
             );
           })}
@@ -338,23 +356,10 @@ const styles = StyleSheet.create({
     textShadowRadius: 3,
   },
 
-  // Grease pencil. The uneven radii are the point — a ring drawn by hand does
-  // not close on itself, and a perfect ellipse reads as a UI ring.
-  ring: {
-    position: 'absolute',
-    top: -5,
-    left: -5,
-    right: -5,
-    bottom: -5,
-    borderWidth: 2.5,
-    borderColor: colors.danger,
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 18,
-    borderBottomLeftRadius: 17,
-    borderBottomRightRadius: 23,
-    transform: [{ rotate: '-1.5deg' }],
-    opacity: 0.9,
-  },
+  // The box the mark is drawn in — outside the frame, so the pencil sits on
+  // the sheet around the picture rather than across it. The loop itself is
+  // generated per selection; see GreaseRing.
+  ringBox: { position: 'absolute', top: -5, left: -5, right: -5, bottom: -5 },
   filterSwatch: {
     width: '100%',
     // The swatch files' own shape, so a zoom of 1 crops nothing.

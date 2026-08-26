@@ -270,6 +270,7 @@ export async function shootFrame(input: {
   // from a later drain without the roll's stock on it.
   const baked = await bakeFilter(input.uri, input.filter ?? 'none');
 
+
   await enqueueFrame({
     rollId: input.rollId,
     bytes: baked,
@@ -326,6 +327,50 @@ export async function fetchPhotos(rollId: string): Promise<Photo[]> {
 
   if (error) throw error;
   return data ?? [];
+}
+
+/** Just enough of a frame to draw it as a cover. */
+export type CoverPhoto = Pick<
+  Photo,
+  'id' | 'roll_id' | 'storage_path' | 'frame_number' | 'width' | 'height'
+>;
+
+/**
+ * The first few visible frames of each of several rolls, in one request.
+ *
+ * This replaced a `fetchPhotos` per roll. Ten developed albums meant ten round
+ * trips, each returning every column of every frame in that roll — a couple of
+ * hundred rows fetched in full to draw thirty thumbnails, with the latency of
+ * ten sequential-ish requests on top. On anything but a fast connection that is
+ * the whole reason the Album tab took its time to appear.
+ *
+ * One `in` query, six columns, grouped here. `taken_at`, `user_id` and the
+ * hidden bookkeeping are not asked for because a cover never shows them.
+ *
+ * Hidden frames are excluded in SQL rather than filtered afterwards: a roll
+ * whose first three frames are all hidden should still have a cover.
+ */
+export async function fetchCoverPhotos(
+  rollIds: string[],
+  perRoll: number,
+): Promise<Record<string, CoverPhoto[]>> {
+  if (rollIds.length === 0) return {};
+
+  const { data, error } = await supabase
+    .from('photos')
+    .select('id, roll_id, storage_path, frame_number, width, height')
+    .in('roll_id', rollIds)
+    .is('hidden_at', null)
+    .order('frame_number', { ascending: true });
+
+  if (error) throw error;
+
+  const byRoll: Record<string, CoverPhoto[]> = {};
+  for (const photo of (data ?? []) as CoverPhoto[]) {
+    const list = (byRoll[photo.roll_id] ??= []);
+    if (list.length < perRoll) list.push(photo);
+  }
+  return byRoll;
 }
 
 /** Signed URLs for a developed roll's frames, keyed by storage path. */

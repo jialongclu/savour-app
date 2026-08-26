@@ -16,14 +16,21 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AlbumCard } from '@/components/AlbumCard';
 import { useTabPillClearance } from '@/components/TabPill';
 import { Button } from '@/components/ui';
-import { fetchFinishedRolls, fetchPhotos, leaveRoll, signPhotoUrls } from '@/lib/api';
+import { fetchCoverPhotos, fetchFinishedRolls, leaveRoll, signPhotoUrls } from '@/lib/api';
 import { aspectOf } from '@/lib/useAlbum';
 import { colors, fonts, space } from '@/theme';
 import type { RollWithMembers } from '@/lib/types';
 
 interface RollCard extends RollWithMembers {
-  /** Cover plus up to two more, for the cards stacked behind it. */
-  covers: (string | null)[];
+  /**
+   * Cover plus up to two more, for the cards stacked behind it.
+   *
+   * Path as well as URL: the URL is a signature that expires within the hour
+   * and is different on every read, so it is useless as a cache key. The path
+   * identifies the photograph itself and lets expo-image serve a cover it
+   * already holds instead of fetching a full-resolution original again.
+   */
+  covers: { url: string | null; path: string }[];
   /** The cover's shape, so the card can take it instead of cropping to a box. */
   coverAspect: number | null;
 }
@@ -40,20 +47,30 @@ export default function Home() {
       // Three frames per roll: the cover, plus two peeking out behind it. The
       // whole photo is kept rather than just its path, because the card now
       // takes its shape from the cover instead of cropping it to a fixed box.
-      const perRoll = await Promise.all(
-        rolls.map(async (roll) => {
-          const photos = await fetchPhotos(roll.id);
-          return photos.filter((p) => !p.hidden_at).slice(0, 3);
-        }),
+      //
+      // One request for all of them. This was a `fetchPhotos` per roll, which
+      // is a round trip per album and every frame of each returned in full to
+      // use three of them.
+      const covers = await fetchCoverPhotos(
+        rolls.map((r) => r.id),
+        3,
       );
 
-      const signed = await signPhotoUrls(perRoll.flat().map((p) => p.storage_path));
+      const signed = await signPhotoUrls(
+        Object.values(covers).flat().map((p) => p.storage_path),
+      );
 
-      return rolls.map((roll, i) => ({
-        ...roll,
-        covers: perRoll[i].map((p) => signed[p.storage_path] ?? null),
-        coverAspect: perRoll[i][0] ? aspectOf(perRoll[i][0]) : null,
-      }));
+      return rolls.map((roll) => {
+        const mine = covers[roll.id] ?? [];
+        return {
+          ...roll,
+          covers: mine.map((p) => ({
+            url: signed[p.storage_path] ?? null,
+            path: p.storage_path,
+          })),
+          coverAspect: mine[0] ? aspectOf(mine[0]) : null,
+        };
+      });
     },
   });
 

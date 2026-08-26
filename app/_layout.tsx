@@ -61,10 +61,18 @@ const persister = createAsyncStoragePersister({
  * name, who is on it, how long it is, what stock it carries. The docket shown
  * after a roll fills offline is built entirely from this.
  *
- * Emphatically not the album or finished-roll queries: those hold signed
- * storage URLs that expire within the hour, and a persisted one would come
- * back from a cold start already dead, showing broken frames rather than
- * fetching working ones.
+ * `finished-rolls` carries cover URLs, and those are signatures that die within
+ * the hour — which used to make persisting it a way of restoring broken images.
+ * It works now because every cover is drawn with its storage path as the image
+ * cache key, so a dead URL falls through to the copy expo-image already holds
+ * on disk and the covers are simply there on a cold start, connection or not.
+ * The refetch replaces the signatures behind them.
+ *
+ * That is a dependency worth stating plainly: drop the `cacheKey` from a cover
+ * and this line quietly becomes a bug again.
+ *
+ * The album query is still not persisted. It is per-roll, unbounded in number,
+ * and holds every frame of every album — the wrong shape for AsyncStorage.
  */
 const PERSISTED = new Set(['active-rolls', 'finished-rolls']);
 

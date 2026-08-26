@@ -1,8 +1,8 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Image } from 'expo-image';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { StatusBar } from 'expo-status-bar';
+import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Animated, {
   Easing,
@@ -12,12 +12,12 @@ import Animated, {
   withDelay,
   withTiming,
 } from 'react-native-reanimated';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { scheduleOnRN } from 'react-native-worklets';
 
 import { DOCKET_REST_AT, LabDocket } from '@/components/LabDocket';
 import { Button } from '@/components/ui';
-import { fetchPhotos, fetchRoll, signPhotoUrls } from '@/lib/api';
+import { fetchRoll } from '@/lib/api';
 import { filterById } from '@/lib/filters';
 import { useQueuedForRoll } from '@/lib/frameQueue';
 import { colors, fonts, space } from '@/theme';
@@ -32,11 +32,17 @@ const REBATE = 16;
 const PITCH = FRAME_H + REBATE;
 
 /**
- * How much of the strip is in view.
+ * How much film is hanging from the top when the wind stops.
  *
- * Just the resting frame and the rebate beneath it. Any taller and the film
- * runs out before the window does, leaving a field of black under the last
- * frame — the strip has nothing below it to show.
+ * One whole frame and the rebate under it — expressed that way rather than as a
+ * number, because the number is not the point: the point is that the cut lands
+ * on a boundary the film actually has. Since frames repeat on `PITCH` and the
+ * strip comes to rest with its bottom edge exactly here, the last frame fills
+ * 0–132 and its rebate closes the tail at 132–148. Nothing is sliced through.
+ *
+ * It was briefly 64, which cut mid-frame. That is shorter and lighter on a
+ * paper-white page, and it read as an offcut: a black band ending wherever it
+ * happened to end. A frame with its rebate reads as film.
  */
 const WINDOW_H = FRAME_H + REBATE;
 
@@ -52,36 +58,46 @@ const STRIP_SHARE = 0.5;
 const PERF_PITCH = PITCH / 8;
 const PERF_W = 15;
 
-/** The wind itself: fast away, decelerating hard onto a stop. No settle. */
-const WIND_MS = 1500;
+/**
+ * The wind itself: fast away, decelerating hard onto a stop. No settle.
+ *
+ * Three seconds. Long for an interface and right for this one — it is the only
+ * moment in the app where a roll is handed over, and hurrying it would make the
+ * thing the whole app is built towards the briefest event in it.
+ */
+const WIND_MS = 3000;
 const WIND_EASING = Easing.bezier(0.12, 0.72, 0.2, 1);
 
 const COPY_DELAY = WIND_MS + 40;
 const CTA_DELAY = WIND_MS + 300;
 
 /**
- * How long the wind will wait on the photographs before going anyway.
+ * How long before the waiting screen offers a way out.
  *
- * A frame that 404s or stalls never reports back, and the roll being finished
- * is news that cannot be withheld on account of one slow image. The strip is
- * legible without every frame decoded; a screen that never animates is not.
+ * Not a verdict on the connection — nothing here infers one — just the point at
+ * which a door is more use than none. Long enough that a big last frame going
+ * up over a slow link is never interrupted by it.
  */
-const LOAD_TIMEOUT_MS = 6000;
+const GIVE_UP_MS = 15000;
 
 /**
- * How long the payoff waits for the last frame to reach the server.
+ * How long this screen looks before it commits to being one thing.
  *
- * Past a working upload — a couple of megabytes usually lands well inside this
- * — and short enough that nobody is left staring at a spinner wondering what
- * they are waiting for.
+ * A roll that fills without signal cannot announce that instantly — the first
+ * send has to fail before anything knows. A second is long enough for that
+ * failure to arrive and short enough to read as the shutter's own pause, and
+ * spending it once is far better than starting the celebration and taking it
+ * away again a beat later.
+ *
+ * Nothing here is waiting on the network to *succeed*. The film comes off this
+ * phone's own disk; this is only the question of which screen is the honest one.
  */
-const SETTLE_MS = 4000;
+const GRACE_MS = 1000;
 
 export default function RollFinished() {
   const { rollId } = useLocalSearchParams<{ rollId: string }>();
   const router = useRouter();
-  const { width } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
+  const { width, height: screenH } = useWindowDimensions();
   const reduced = useReducedMotion();
 
   // Frames this phone has taken but not yet handed over. While there are any,
@@ -89,27 +105,31 @@ export default function RollFinished() {
   // these, so there is nothing complete to show.
   const { count: queuedHere, stalled } = useQueuedForRoll(rollId);
 
+  /**
+   * The roll, and only the roll.
+   *
+   * Nothing here fetches photographs any more. The strip is bare film, so the
+   * one thing the server is still asked is whether the roll has developed —
+   * which decides the way in to the album, and nothing about the animation.
+   */
   const { data, isError, refetch } = useQuery({
     queryKey: ['finished-roll', rollId],
-    queryFn: async () => {
-      const [roll, photos] = await Promise.all([fetchRoll(rollId!), fetchPhotos(rollId!)]);
-      // The *end* of the roll, not the start. `fetchPhotos` returns frames in
-      // shooting order, so the last of these is the frame that just finished
-      // the roll — which is the one the film has to come to rest on.
-      const paths = photos
-        .filter((p) => !p.hidden_at)
-        .slice(-MAX_FRAMES_ON_STRIP)
-        .map((p) => p.storage_path);
-      const signed = await signPhotoUrls(paths);
-      // Carry the path alongside the URL: it is the stable identity for both
-      // the cache key and the list key, where the signed URL is not.
-      const strip = paths.filter((p) => signed[p]).map((p) => ({ path: p, url: signed[p] }));
-      return { roll, strip };
-    },
+    queryFn: async () => ({ roll: await fetchRoll(rollId!) }),
     enabled: !!rollId,
     // Offline this fails immediately and would otherwise sit failed forever;
     // the drain below is what actually revives it.
     retry: 1,
+    /**
+     * Asked again until the roll is actually finished.
+     *
+     * Arriving here is the last shutter press, not the last upload — the frame
+     * is still going up as the screen mounts, and until the server has it the
+     * roll's status is unchanged and every photograph it returns is hidden.
+     * One refetch on the queue draining was not enough on its own: it fires
+     * when this phone is done, which for a shared roll is not the same moment
+     * the roll fills. Polling stops the instant the status flips.
+     */
+    refetchInterval: (q) => (q.state.data?.roll?.status === 'finished' ? false : 1500),
   });
 
   /**
@@ -131,29 +151,57 @@ export default function RollFinished() {
   const developed = data?.roll?.status === 'finished';
 
   /**
-   * Long enough for a working connection to finish the last frame.
+   * A way off this screen, once waiting has stopped looking temporary.
    *
-   * Every frame is queued, online or not — the shutter writes to disk and
-   * returns while the upload is still in flight — so a frame merely *being* in
-   * the queue said nothing, and the docket was shown to everybody. What is
-   * needed is evidence that the upload will not land: either a send that came
-   * back a transport failure, or enough time passing that it plainly is not
-   * coming.
+   * Only a button, and only reachable now on a roll with no cached film to run.
+   * It deliberately does not change what the screen *claims* is happening:
+   * elapsed time cannot tell a dead connection from a slow one, and every
+   * attempt to infer one from the other put the offline docket in front of
+   * somebody who was online the whole time.
    */
-  const [waited, setWaited] = useState(false);
+  const [stuck, setStuck] = useState(false);
   useEffect(() => {
-    const t = setTimeout(() => setWaited(true), SETTLE_MS);
+    const t = setTimeout(() => setStuck(true), GIVE_UP_MS);
+    return () => clearTimeout(t);
+  }, []);
+
+  /** The grace has elapsed and the screen may now commit to being the film. */
+  const [graced, setGraced] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setGraced(true), GRACE_MS);
     return () => clearTimeout(t);
   }, []);
 
   /**
    * The roll filled here, but not everywhere.
    *
-   * `stalled` is the honest signal and arrives within a second of the first
-   * failed send; `waited` is the backstop for a connection so slow it may as
-   * well be absent, and `isError` for a roll that could not be read at all.
+   * Evidence only — never elapsed time. `stalled` is what the frame queue
+   * reports after a send comes back a transport failure, which happens within a
+   * second of there being no connection; `isError` is the roll itself failing
+   * to load. Both mean something actually went wrong. A timer means only that
+   * an upload is taking a while, which online is ordinary, and reading it as
+   * absence is what kept showing the offline docket to people on wifi.
    */
-  const pending = !developed && queuedHere > 0 && (stalled || isError || waited);
+  const stranded = !developed && queuedHere > 0 && (stalled || isError);
+
+  /**
+   * Which screen this is, decided once and then left alone.
+   *
+   * The film waits on nothing at all now — it is drawn, not fetched — so the
+   * only question left is whether the frames are going anywhere. That question
+   * gets one second: evidence of a failed send inside it means the docket, and
+   * silence means the roll is going up fine and the film runs.
+   *
+   * Committed rather than derived, because a screen that keeps re-deciding is
+   * how the celebration ended up being replaced by a docket a beat after it
+   * started, and how the docket ended up in front of people on wifi.
+   */
+  const [screen, setScreen] = useState<'deciding' | 'film' | 'docket'>('deciding');
+  useEffect(() => {
+    if (screen !== 'deciding') return;
+    if (stranded && knownRoll) setScreen('docket');
+    else if (graced && knownRoll) setScreen('film');
+  }, [screen, stranded, graced, knownRoll]);
 
   // The moment the last frame goes up, ask again. Without this the docket would
   // sit there after the sync had already finished.
@@ -174,71 +222,58 @@ export default function RollFinished() {
   const footStyle = useAnimatedStyle(() => ({ opacity: foot.get() }));
 
   /**
-   * Shooting order, so the film runs to its end and stops on the last exposure.
+   * How much film is on the spool.
    *
-   * This used to be reversed, which read as a rewind but landed on frame one —
-   * the oldest photograph on the roll, shown at the moment you finished it.
-   * Running forwards puts the frame you just took in the gate.
+   * Drawn from the roll's own length rather than from a list of photographs,
+   * capped at what the window can travel past in one wind. Nothing here needs
+   * to know which frame is which — every exposed frame is opaque, and that is
+   * the point of the roll rather than a limitation of the screen.
    */
-  const frames = data?.strip ?? [];
+  const frameCount = Math.min(MAX_FRAMES_ON_STRIP, Math.max(1, knownRoll?.max_frames ?? 1));
 
-  const travel = Math.max(0, (frames.length - 1) * PITCH);
+  /** The length of film, and the two ends of its journey up the screen. */
+  const stripH = frameCount * PITCH;
 
   /**
-   * The film does not move until there is something printed on it.
-   *
-   * A signed URL is only a string: having one says the frame can be fetched,
-   * not that it has been. Winding on the query alone ran the strip past eight
-   * empty rectangles and dropped the photographs in afterwards, at rest —
-   * exactly backwards, since the travel is what is meant to show them.
-   *
-   * Load events rather than `Image.prefetch`, which takes no `cacheKey` and so
-   * cannot be relied on to fill the cache these frames actually read from.
+   * Below the screen entirely, so the roll arrives rather than being revealed.
+   * The first moment is empty paper, which is what makes the film coming up
+   * into it read as an entrance.
    */
-  const [framesReady, setFramesReady] = useState(false);
-  const settled = useRef(0);
-  const stripKey = frames.map((f) => f.path).join('|');
+  const windFrom = screenH;
 
-  useEffect(() => {
-    settled.current = 0;
-    setFramesReady(false);
-
-    if (!data?.roll) return;
-    // A roll whose frames are all hidden still deserves its moment.
-    if (frames.length === 0) {
-      setFramesReady(true);
-      return;
-    }
-
-    const timer = setTimeout(() => setFramesReady(true), LOAD_TIMEOUT_MS);
-    return () => clearTimeout(timer);
-  }, [stripKey, data?.roll?.id, frames.length]);
-
-  // Errors count as settled: a frame that will never arrive must not hold the
-  // wind behind it for the full timeout.
-  const onFrameSettled = useCallback(() => {
-    settled.current += 1;
-    if (settled.current >= frames.length) setFramesReady(true);
-  }, [frames.length]);
+  /**
+   * Far enough up that only the tail is left hanging from the top edge. The
+   * strip's bottom lands exactly on WINDOW_H.
+   */
+  const windTo = WINDOW_H - stripH;
 
   const wind = useSharedValue(0);
   const copy = useSharedValue(0);
   const cta = useSharedValue(0);
 
+  /**
+   * Whether this wind has already been run.
+   *
+   * The query keeps polling until the roll develops, and every answer was once
+   * a fresh reason to wind the film again. A roll finishes once, so it is shown
+   * finishing once.
+   */
+  const played = useRef(false);
+
   useEffect(() => {
-    if (!data?.roll || !framesReady) return;
+    if (screen !== 'film' || played.current) return;
+    played.current = true;
 
     if (reduced) {
-      wind.set(-travel);
+      wind.set(windTo);
       copy.set(1);
-      cta.set(1);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       return;
     }
 
-    wind.set(0);
+    wind.set(windFrom);
     wind.set(
-      withTiming(-travel, { duration: WIND_MS, easing: WIND_EASING }, (done) => {
+      withTiming(windTo, { duration: WIND_MS, easing: WIND_EASING }, (done) => {
         'worklet';
         // On the stop, not on mount. The buzz is the mechanism landing; firing
         // it when the data arrives means it goes off before anything has moved.
@@ -247,8 +282,25 @@ export default function RollFinished() {
     );
 
     copy.set(withDelay(COPY_DELAY, withTiming(1, { duration: 460 })));
+  }, [screen, windFrom, windTo, reduced]);
+
+  /**
+   * The way in to the album, held back until there is an album to go to.
+   *
+   * The wind now runs off cached film, which can be a moment before the server
+   * has the last frame — and the album reads the real photographs, which stay
+   * unreadable until the roll is developed. Tying this to the wind's clock
+   * would offer a door onto an empty room. It is tied to the fact instead, and
+   * on a working connection the fact arrives while the film is still moving.
+   */
+  useEffect(() => {
+    if (screen !== 'film' || !developed) return;
+    if (reduced) {
+      cta.set(1);
+      return;
+    }
     cta.set(withDelay(CTA_DELAY, withTiming(1, { duration: 420 })));
-  }, [data?.roll?.id, travel, reduced, framesReady]);
+  }, [screen, developed, reduced, cta]);
 
   const windStyle = useAnimatedStyle(() => ({ transform: [{ translateY: wind.get() }] }));
 
@@ -262,13 +314,15 @@ export default function RollFinished() {
     transform: [{ translateY: (1 - cta.get()) * 10 }],
   }));
 
-  if (pending && knownRoll) {
+  if (screen === 'docket' && knownRoll) {
     const customers = knownRoll.members
       .map((m) => m.profile?.username)
       .filter((n): n is string => !!n);
 
     return (
-      <SafeAreaView style={styles.screen} edges={['top', 'left', 'right']}>
+      <SafeAreaView style={styles.docketScreen} edges={['top', 'left', 'right']}>
+        {/* The only dark screen left here, so the only one that needs light icons. */}
+        <StatusBar style="light" />
         <View style={styles.docketBody}>
           <LabDocket
             title={knownRoll.name}
@@ -291,39 +345,98 @@ export default function RollFinished() {
     );
   }
 
-  if (!data?.roll) {
+  /**
+   * The grace, and anything longer than it.
+   *
+   * With film cached here this is a second at most — just long enough to learn
+   * whether the frames are going anywhere. Without it, this is the old wait:
+   * the photographs have to be fetched before there is anything to wind.
+   */
+  if (screen !== 'film') {
     return (
       <SafeAreaView style={[styles.screen, styles.center]}>
-        <ActivityIndicator color={colors.onDark} />
+        <ActivityIndicator color={colors.ink} />
+
+        {/* Appears only if the wait outlasts a normal upload. No explanation
+            offered, because none can be given honestly from here — the film is
+            still going up, and how long that takes is the connection's
+            business. This is a door, not a diagnosis. */}
+        {stuck ? (
+          <View style={styles.waitOut}>
+            <Text style={styles.waitNote}>Still developing.</Text>
+            <Button
+              title="View Active Films"
+              variant="ghost"
+              onPress={() => router.replace('/film')}
+            />
+          </View>
+        ) : null}
       </SafeAreaView>
     );
   }
 
-  const { roll } = data;
+  /**
+   * The roll as described to the reader.
+   *
+   * From the server when it has answered, and from the persisted list of active
+   * rolls when it has not — the camera was shooting into this roll a second ago,
+   * so its name and its members are already in hand. The film no longer waits
+   * for a request, and neither does the caption under it.
+   */
+  const roll = knownRoll;
+  if (!roll) {
+    return (
+      <SafeAreaView style={[styles.screen, styles.center]}>
+        <ActivityIndicator color={colors.ink} />
+      </SafeAreaView>
+    );
+  }
+
   const names = roll.members.map((m) => m.profile?.username).filter((n): n is string => !!n);
+
+  /**
+   * The server's count once there is one, and the roll's full length until then.
+   *
+   * The cached copy predates the last shutter, so reading `photo_count` off it
+   * would announce a full roll as one frame short of itself.
+   */
+  const counted = data?.roll?.photo_count ?? roll.max_frames;
 
   const stripW = Math.round(width * STRIP_SHARE);
   const coreW = stripW - PERF_W * 2;
-  const stripH = Math.max(WINDOW_H, frames.length * PITCH);
-  // Only as far as the film actually travels past the window.
-  const holes = holePositions(travel + WINDOW_H);
+  // Punched the whole length of the film, since the whole length now passes
+  // through the screen rather than a window's worth of it.
+  const holes = holePositions(stripH);
 
   return (
-    <SafeAreaView style={styles.screen} edges={['top', 'left', 'right']}>
-      {/* The window runs to the very top of the screen, but the film inside it
-          starts below the notch. The strip appears to carry on off the top edge
-          — which is true, it has just wound past — and the only thing under the
-          cut-out is bare film edge, never a photograph. */}
-      <View style={[styles.window, { height: insets.top + WINDOW_H, width: stripW }]}>
-        <Animated.View style={[styles.reel, { top: insets.top, height: stripH }, windStyle]}>
-          {frames.map(({ path, url }, i) => (
-            <Image
-              key={path}
-              source={{ uri: url, cacheKey: path }}
+    /* No top edge. Padding the safe area would hold the gate below the notch,
+       and the film would stop short of the screen's actual top — a strip
+       hanging under the status bar rather than one carrying on past it. The
+       copy below centres in the full height and is nowhere near the cut-out. */
+    <SafeAreaView style={styles.screen} edges={['left', 'right']}>
+      {/* The gate is the whole screen now, not a slot at the top of it: the
+          roll comes up from below the bottom edge, crosses the screen, and
+          carries on off the top until only its tail is left. Which means this
+          view has to be transparent — it used to be filled with film edge, and
+          at full height that would be a black column standing there before any
+          film had arrived and after it had gone.
+
+          Nothing is lost behind the cut-out: the strip is half the screen's
+          width and centred, so the clock and the battery sit outside it. */}
+      <View style={[styles.window, { width: stripW }]}>
+        <Animated.View style={[styles.reel, { top: 0, height: stripH }, windStyle]}>
+          {/* Bare film. The frames were printed here for a while and it was
+              never worth what it cost: the photographs are full-resolution
+              originals kept for downloading, far too heavy for a strip 166
+              points wide, and every attempt to get them onto it in time — a
+              load gate, a thumbnail cache written at exposure — bought a
+              smoother wind at the price of another thing that could go wrong.
+              Exposed film is opaque anyway (§9.2). This is what a roll actually
+              looks like coming off the spool, and it cannot fail to load. */}
+          {Array.from({ length: frameCount }, (_, i) => (
+            <View
+              key={i}
               style={[styles.frame, { top: i * PITCH, left: PERF_W, width: coreW }]}
-              contentFit="cover"
-              onLoad={onFrameSettled}
-              onError={onFrameSettled}
             />
           ))}
 
@@ -342,21 +455,19 @@ export default function RollFinished() {
         <Animated.View style={[styles.copy, copyStyle]}>
           <Text style={styles.label}>
             {roll.developed_early
-              ? `DEVELOPED EARLY · ${roll.photo_count} OF ${roll.max_frames}`
-              : `${roll.photo_count} OF ${roll.max_frames} · DEVELOPED`}
+              ? `DEVELOPED EARLY · ${counted} OF ${roll.max_frames}`
+              : `${counted} OF ${roll.max_frames} · DEVELOPED`}
           </Text>
           <Text style={styles.name}>{roll.name}</Text>
           <Text style={styles.by}>{creditLine(names)}</Text>
         </Animated.View>
 
         <Animated.View style={ctaStyle}>
-          {/* Ghost, not dark: on a black screen the filled variant is a black
-              button with a white label, which is the wrong way round here. */}
-          <Button
-            title="See the roll"
-            variant="ghost"
-            onPress={() => router.replace(`/album/${roll.id}`)}
-          />
+          {/* Filled now that the page is paper. On the black screen this had to
+              be a ghost, because the filled variant is black on white and would
+              have vanished into it; on white it is the right way round again,
+              and this is the screen's one action. */}
+          <Button title="See the roll" onPress={() => router.replace(`/album/${roll.id}`)} />
         </Animated.View>
       </View>
     </SafeAreaView>
@@ -383,23 +494,41 @@ function creditLine(names: string[]): string {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.bodyBlack },
+  // Paper. The film is the only dark thing on the screen now, which is how a
+  // developed strip is actually looked at — held up against the light rather
+  // than glowing on a black field.
+  screen: { flex: 1, backgroundColor: colors.paper },
+  // The docket keeps the dark ground it was drawn for: it is a white receipt,
+  // and a white receipt on white paper is not a receipt.
+  docketScreen: { flex: 1, backgroundColor: colors.bodyBlack },
   center: { alignItems: 'center', justifyContent: 'center' },
+
+  waitOut: { position: 'absolute', bottom: space.xxl + space.md, left: space.xl, right: space.xl },
+  waitNote: {
+    fontFamily: fonts.serif,
+    fontSize: 15,
+    color: colors.muted,
+    textAlign: 'center',
+    marginBottom: space.md,
+  },
 
   // The paper hangs from the top of the screen, as it would from a slot.
   docketBody: { flex: 1, paddingTop: space.xxl },
   docketFoot: { paddingHorizontal: space.xl, paddingBottom: space.xxl + space.md },
 
+  // Full height and out of the flow, so the copy below centres on the screen's
+  // own middle rather than on whatever is left under the film. Transparent: the
+  // black belongs to the film, which is the thing that moves.
   window: {
-    // Out of the flow: the copy below centres on the screen's own middle rather
-    // than on whatever is left under the film.
     position: 'absolute',
     top: 0,
+    bottom: 0,
     alignSelf: 'center',
     overflow: 'hidden',
-    backgroundColor: colors.filmEdge,
   },
-  reel: { position: 'absolute', left: 0, right: 0 },
+  // The film's own edge, carried by the film rather than painted on the gate
+  // behind it — otherwise the black stays put while the roll travels through.
+  reel: { position: 'absolute', left: 0, right: 0, backgroundColor: colors.filmEdge },
   frame: { position: 'absolute', height: FRAME_H, backgroundColor: colors.filmSpent },
   hole: {
     position: 'absolute',
@@ -426,20 +555,20 @@ const styles = StyleSheet.create({
     fontFamily: fonts.mono,
     fontSize: 10,
     letterSpacing: 1.6,
-    color: 'rgba(255,255,255,0.5)',
+    color: colors.muted,
     marginBottom: space.sm,
   },
   name: {
     fontFamily: fonts.serifSemi,
     fontSize: 28,
-    color: colors.onDark,
+    color: colors.ink,
     textAlign: 'center',
     letterSpacing: -0.4,
   },
   by: {
     fontFamily: fonts.serif,
     fontSize: 15,
-    color: 'rgba(255,255,255,0.55)',
+    color: colors.muted,
     textAlign: 'center',
     marginTop: space.sm,
   },

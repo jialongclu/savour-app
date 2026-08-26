@@ -60,6 +60,17 @@ export interface QueuedFrame {
   attempts: number;
   /** Last failure, kept for the UI rather than for logic. */
   lastError?: string;
+  /**
+   * Parked for want of a connection, rather than merely having failed once.
+   *
+   * The distinction earns its own field because screens act on it. `lastError`
+   * is set by every kind of failure, including one transient stumble on a send
+   * that succeeds moments later — reading it as "offline" put the offline
+   * docket in front of people who were on wifi the whole time. This is set only
+   * where the send could not reach the server at all, and cleared the moment
+   * one does reach it.
+   */
+  waiting?: boolean;
 }
 
 type Listener = () => void;
@@ -125,7 +136,10 @@ export function useQueuedForRoll(rollId?: string): { count: number; stalled: boo
   const items = useSyncExternalStore(subscribeToQueue, queueSnapshot, queueSnapshot);
   return useMemo(() => {
     const mine = rollId ? items.filter((i) => i.rollId === rollId) : items;
-    return { count: mine.length, stalled: mine.some((i) => !!i.lastError) };
+    // `waiting`, not `lastError`. The latter is true of any frame that has ever
+    // failed for any reason, which includes one that stumbled once and is
+    // uploading perfectly well now.
+    return { count: mine.length, stalled: mine.some((i) => i.waiting === true) };
   }, [items, rollId]);
 }
 
@@ -239,7 +253,11 @@ async function removeItem(id: string) {
 async function recordFailure(id: string, message: string) {
   const items = await readIndex();
   await writeIndex(
-    items.map((i) => (i.id === id ? { ...i, attempts: i.attempts + 1, lastError: message } : i)),
+    // Cleared: the server answered, so whatever went wrong, it was not the
+    // connection.
+    items.map((i) =>
+      i.id === id ? { ...i, attempts: i.attempts + 1, lastError: message, waiting: false } : i,
+    ),
   );
 }
 
@@ -247,7 +265,9 @@ async function recordFailure(id: string, message: string) {
 async function failPermanently(id: string, message: string) {
   const items = await readIndex();
   await writeIndex(
-    items.map((i) => (i.id === id ? { ...i, attempts: MAX_ATTEMPTS, lastError: message } : i)),
+    items.map((i) =>
+      i.id === id ? { ...i, attempts: MAX_ATTEMPTS, lastError: message, waiting: false } : i,
+    ),
   );
 }
 
@@ -283,7 +303,9 @@ function isTransportFailure(e: unknown): boolean {
 /** Note why it is waiting, without spending one of its tries. */
 async function noteWaiting(id: string, message: string) {
   const items = await readIndex();
-  await writeIndex(items.map((i) => (i.id === id ? { ...i, lastError: message } : i)));
+  await writeIndex(
+    items.map((i) => (i.id === id ? { ...i, lastError: message, waiting: true } : i)),
+  );
 }
 
 /**
@@ -317,7 +339,7 @@ async function reviveOfflineStuck() {
   if (!items.some(stuck)) return;
 
   await writeIndex(
-    items.map((i) => (stuck(i) ? { ...i, attempts: 0, lastError: undefined } : i)),
+    items.map((i) => (stuck(i) ? { ...i, attempts: 0, lastError: undefined, waiting: false } : i)),
   );
 }
 
@@ -406,7 +428,7 @@ export async function retryStuckFrames() {
   const items = await readIndex();
   await writeIndex(
     items.map((i) =>
-      i.attempts >= MAX_ATTEMPTS ? { ...i, attempts: 0, lastError: undefined } : i,
+      i.attempts >= MAX_ATTEMPTS ? { ...i, attempts: 0, lastError: undefined, waiting: false } : i,
     ),
   );
 }

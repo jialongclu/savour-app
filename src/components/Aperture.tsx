@@ -276,6 +276,49 @@ export function Close({ size = 24, color, strokeWidth = 1.8 }: IconProps) {
   );
 }
 
+/**
+ * Turn the camera around.
+ *
+ * Two arcs rather than a closed ring, because the breaks are what the
+ * arrowheads sit in — a complete circle with heads stuck on it reads as a
+ * refresh control. The lens in the middle is what makes it a camera turning
+ * rather than anything else turning.
+ */
+export function FlipGlyph({ size = 24, color, strokeWidth = 1.6 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M5 11.2a7 7 0 0 1 11.6-4.3"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+      />
+      <Path
+        d="M19 12.8a7 7 0 0 1-11.6 4.3"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+      />
+      {/* Corner heads, their elbows landing on the arc ends. */}
+      <Path
+        d="M16.8 3.4v3.6h-3.6"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Path
+        d="M7.2 20.6V17h3.6"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Circle cx="12" cy="12" r="2.4" stroke={color} strokeWidth={strokeWidth} />
+    </Svg>
+  );
+}
+
 export function ChevronLeft({ size = 24, color, strokeWidth = 1.8 }: IconProps) {
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">

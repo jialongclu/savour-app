@@ -20,7 +20,7 @@ import Purchases, {
  */
 
 /** The entitlement configured in RevenueCat. Everything else is presentation. */
-export const ENTITLEMENT = 'plus';
+export const ENTITLEMENT = 'savour_pro';
 
 /** Rolls before the wall. Mirrors `free_roll_allowance()` on the server. */
 export const FREE_ROLLS = 3;
@@ -89,7 +89,7 @@ export async function configurePurchases(userId: string): Promise<void> {
 export async function logOutOfPurchases(): Promise<void> {
   if (!billingReady() || !configured) return;
   // Anonymous from here, so the next account starts without this one's status.
-  await Purchases.logOut().catch(() => {});
+  await Purchases.logOut().catch(() => { });
 }
 
 function hasPlus(info: CustomerInfo | null): boolean {
@@ -115,7 +115,7 @@ export function usePlus(): { plus: boolean; loading: boolean } {
 
     Purchases.getCustomerInfo()
       .then((i) => alive && setInfo(i))
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => alive && setLoading(false));
 
     // `add...` returns void here; removal takes the same function back.
@@ -144,9 +144,65 @@ export function useOffering(): { packages: PurchasesPackage[]; loading: boolean 
     let alive = true;
     Purchases.getOfferings()
       .then((o) => {
-        if (alive && o.current) setPackages(o.current.availablePackages);
+        if (!alive) return;
+        if (o.current) setPackages(o.current.availablePackages);
+
+        /**
+         * Three different failures used to look identical on screen, and all
+         * three end with an empty paywall: no offering marked Current, an
+         * offering holding no packages, or packages whose products the store
+         * would not sell us. Only the last is common, and only this can tell
+         * them apart.
+         *
+         * Development only — a release build has nobody reading the console,
+         * and the offering names are not worth printing on a customer's device.
+         */
+        if (__DEV__) {
+          const named = Object.keys(o.all);
+          if (!o.current) {
+            console.warn(
+              `[purchases] ${named.length} offering(s) exist (${named.join(', ')}) but none is ` +
+              'set as Current. Mark one as the Default offering in RevenueCat.',
+            );
+          } else if (o.current.availablePackages.length === 0) {
+            console.warn(
+              `[purchases] Offering "${o.current.identifier}" came back with no packages. ` +
+              'Either it holds none, or the store refused every product in it — on iOS that ' +
+              'means the products do not exist in App Store Connect, are not yet Ready to ' +
+              'Submit, or the Paid Apps agreement is not Active.',
+            );
+          } else {
+            console.log(
+              `[purchases] Offering "${o.current.identifier}": ` +
+              o.current.availablePackages
+                .map((p) => `${p.identifier} → ${p.product.identifier} ${p.product.priceString}`)
+                .join(', '),
+            );
+          }
+        }
       })
-      .catch(() => {})
+      .catch((e: any) => {
+        // Swallowed for the UI's sake — the paywall degrades to its empty
+        // state rather than throwing — but never swallowed silently in dev,
+        // because this is where a misconfigured key or bundle ID announces
+        // itself and the screen alone cannot say so.
+        //
+        // `message` is close to useless on a RevenueCat error: the top-level
+        // text for a configuration fault is the same sentence whatever caused
+        // it, and it ends by telling you to go and read the underlying error.
+        // That underlying error is the one that names the actual problem, so
+        // it is printed here rather than left for someone to dig out of a
+        // debugger.
+        if (__DEV__) {
+          console.warn(
+            '[purchases] getOfferings failed\n' +
+              `  code:       ${e?.code} ${e?.readableErrorCode ?? ''}\n` +
+              `  message:    ${e?.message ?? e}\n` +
+              `  underlying: ${e?.underlyingErrorMessage ?? '(none given)'}\n` +
+              `  key:        ${apiKey()?.slice(0, 12)}…`,
+          );
+        }
+      })
       .finally(() => alive && setLoading(false));
 
     return () => {

@@ -2,6 +2,7 @@ import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  Linking,
   Modal,
   Pressable,
   StyleSheet,
@@ -18,13 +19,23 @@ import Animated, {
 import { scheduleOnRN } from 'react-native-worklets';
 
 import { MoreGlyph } from './Aperture';
-import { saveAlbumInBackground } from '@/lib/download';
+import { askPhotoAccess, photoAccess, saveAlbumInBackground } from '@/lib/download';
 import { colors, fonts, radius, space } from '@/theme';
 import type { RollWithMembers } from '@/lib/types';
 
 interface Props {
   roll: RollWithMembers;
   onDelete(): void | Promise<void>;
+  /**
+   * Whether this menu offers to save the roll to Photos.
+   *
+   * Only inside an album. On a cover in the list the offer is abstract — it
+   * asks someone to commit their phone to a few hundred megabytes of
+   * photographs they are not currently looking at, from a menu they most likely
+   * opened to do something else. Inside, the frames are on screen, the album's
+   * own progress runs under its header, and the request has an obvious subject.
+   */
+  canSave?: boolean;
 }
 
 /**
@@ -52,7 +63,7 @@ const OPEN_EASE = Easing.bezier(0.2, 0.9, 0.2, 1);
  */
 const FROM = 0.16;
 
-export function AlbumMenu({ roll, onDelete }: Props) {
+export function AlbumMenu({ roll, onDelete, canSave = false }: Props) {
   const [visible, setVisible] = useState(false);
   const [anchor, setAnchor] = useState<{ top: number; right: number }>({
     top: 0,
@@ -105,27 +116,105 @@ export function AlbumMenu({ roll, onDelete }: Props) {
   const shared = roll.members.length > 1;
 
   /**
+   * Ask before the system does.
+   *
+   * iOS gives one photo-library prompt per install. Answer it wrongly — or tap
+   * it away while wondering what it is for — and the only route back is
+   * Settings, which most people will not find and none should have to. So the
+   * reason goes first, in the app's own words, and the system prompt follows a
+   * deliberate Continue.
+   *
+   * Resolves false when there is no point going on.
+   */
+  async function ensureAccess(): Promise<boolean> {
+    const access = await photoAccess();
+    if (access === 'granted') return true;
+
+    if (access === 'blocked') {
+      return new Promise((resolve) => {
+        Alert.alert(
+          'Photo access is off',
+          'Savour cannot reach your photo library, so there is nowhere to put this roll. ' +
+            'You can turn it back on in Settings.',
+          [
+            { text: 'Not now', style: 'cancel', onPress: () => resolve(false) },
+            {
+              text: 'Open Settings',
+              onPress: () => {
+                Linking.openSettings().catch(() => {});
+                resolve(false);
+              },
+            },
+          ],
+        );
+      });
+    }
+
+    const agreed = await new Promise<boolean>((resolve) => {
+      Alert.alert(
+        'Save this roll to your photos?',
+        `Savour needs access to your photo library to put the frames from “${roll.name}” in it. ` +
+          'Choosing “All Photos” also lets it file them into an album named after the roll; ' +
+          '“Add Photos Only” saves them loose.',
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Continue', onPress: () => resolve(true) },
+        ],
+      );
+    });
+
+    if (!agreed) return false;
+    return askPhotoAccess();
+  }
+
+  /**
    * Hand the save off and close.
    *
    * The menu used to stay open over a percentage until the last frame landed.
-   * Nothing about the work needed anyone to watch it, so this now returns the
-   * screen immediately and speaks up once, at the end — the tap is
-   * acknowledged by the menu closing and a knock of haptic feedback, and the
-   * first run raises the system permission sheet anyway.
+   * Nothing about the work needed anyone to watch it, so this returns the screen
+   * immediately: the film band under the album's header carries the progress,
+   * and this speaks up once, at the end.
    *
-   * Deliberately not awaited, and deliberately not holding component state: the
-   * save keeps running if this menu unmounts, or if its whole screen does.
+   * Permission is settled first and on the caller's clock, before any work
+   * starts. Asking from inside the save would put a system sheet in front of
+   * somebody who had already been told their photographs were on their way.
+   *
+   * The save itself is deliberately not awaited and holds no component state: it
+   * keeps running if this menu unmounts, or if its whole screen does.
    */
   function save() {
-    close(() => {
+    close(async () => {
+      if (!(await ensureAccess())) return;
+
       const started = saveAlbumInBackground(roll.id, {
-        onDone: ({ saved, failed }) => {
+        onDone: ({ saved, failed, hidden, grouped }) => {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+
+          // Facts of different kinds. Frames saved is the outcome; where they
+          // ended up depends on a permission the person may not have given;
+          // hidden frames are a decision they already made and are owed an
+          // account of; failures are the only part worth trying again.
+          const lines = [
+            grouped
+              ? `${saved} ${saved === 1 ? 'frame is' : 'frames are'} in an album called “${roll.name}”.`
+              : `${saved} ${saved === 1 ? 'frame is' : 'frames are'} in your library. ` +
+                'They could not be put in an album — Savour only has permission to add photos, ' +
+                'not to organise them.',
+          ];
+          if (hidden > 0) {
+            lines.push(
+              hidden === 1
+                ? 'One hidden frame was left out.'
+                : `${hidden} hidden frames were left out.`,
+            );
+          }
+          if (failed > 0) {
+            lines.push(`${failed} could not be fetched — try again for those.`);
+          }
+
           Alert.alert(
             failed === 0 ? 'Saved to Photos' : 'Saved, with some missing',
-            failed === 0
-              ? `${saved} ${saved === 1 ? 'frame is' : 'frames are'} in an album called “${roll.name}”.`
-              : `${saved} saved, ${failed} could not be fetched. Try again for the rest.`,
+            lines.join('\n\n'),
           );
         },
         onFail: (message) => Alert.alert("Couldn't save this album", message),
@@ -197,22 +286,26 @@ export function AlbumMenu({ roll, onDelete }: Props) {
             // covers the dots it came out of.
             style={[styles.bubble, { top: anchor.top, right: anchor.right }, growStyle]}
           >
+            {/* Saving comes first where it appears at all: it is the
+                reversible one, and putting a destructive action at the top of a
+                two-item menu is how people tap it by accident. */}
+            {canSave ? (
+              <>
+                <Pressable
+                  onPress={save}
+                  accessibilityRole="button"
+                  style={({ pressed }) => [styles.item, pressed && styles.itemPressed]}
+                >
+                  <Text style={styles.action}>Save to Photos</Text>
+                </Pressable>
+
+                <View style={styles.rule} />
+              </>
+            ) : null}
+
             {/* One wording either way. What actually happens still differs —
                 a solo roll is destroyed — but that belongs in the confirmation
                 that follows, not in a menu item read at a glance. */}
-            {/* Saving comes first: it is the reversible one, and putting a
-                destructive action at the top of a two-item menu is how people
-                tap it by accident. */}
-            <Pressable
-              onPress={save}
-              accessibilityRole="button"
-              style={({ pressed }) => [styles.item, pressed && styles.itemPressed]}
-            >
-              <Text style={styles.action}>Save to Photos</Text>
-            </Pressable>
-
-            <View style={styles.rule} />
-
             <Pressable
               onPress={confirm}
               accessibilityRole="button"

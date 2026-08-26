@@ -15,10 +15,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AlbumMenu } from '@/components/AlbumMenu';
+import { FilmProgress } from '@/components/FilmProgress';
 import { ScreenHeader } from '@/components/ScreenHeader';
 import { Avatar, AvatarStack, Label } from '@/components/ui';
 import { hidePhoto, leaveRoll, reportPhoto, unhidePhoto } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { useSaveProgress } from '@/lib/download';
 import { aspectOf, useAlbum, type Frame } from '@/lib/useAlbum';
 import { colors, fonts, space } from '@/theme';
 import type { Profile } from '@/lib/types';
@@ -31,6 +33,10 @@ export default function Album() {
   const { width } = useWindowDimensions();
 
   const { data, isLoading } = useAlbum(rollId);
+
+  // Watched here rather than owned by the menu: the save keeps running after
+  // the menu closes, and this screen is what stays on to report it.
+  const saving = useSaveProgress(rollId);
 
   // The same action the album's card carries on the Album tab, so it can be
   // reached from inside the album too rather than only from the grid.
@@ -159,8 +165,13 @@ export default function Album() {
     <SafeAreaView style={styles.screen} edges={['left', 'right']}>
       <ScreenHeader
         title={roll.name}
-        right={<AlbumMenu roll={roll} onDelete={() => remove.mutate()} />}
+        right={<AlbumMenu roll={roll} onDelete={() => remove.mutate()} canSave />}
       />
+
+      {/* Under the header and above the grid, where the rule between them
+          already is. Nothing moves to make room for it — the track is always
+          the same height and simply has nothing in it most of the time. */}
+      <FilmProgress progress={saving} />
 
       <ScrollView contentContainerStyle={styles.scroll}>
         {/* One line above the grid: how much is here, and who shot it. */}
@@ -198,6 +209,10 @@ export default function Album() {
                       // without a stable key each re-sign would miss the disk
                       // cache and pull every frame down again.
                       source={{ uri: frame.url ?? undefined, cacheKey: frame.storage_path }}
+                      // Kept in memory as well as on disk: a grid is scrolled
+                      // back and forth, and re-decoding a full-resolution frame
+                      // each time it returns is the expensive half.
+                      cachePolicy="memory-disk"
                       style={[styles.photo, { aspectRatio: aspectFor(frame) }]}
                       contentFit="cover"
                       transition={160}

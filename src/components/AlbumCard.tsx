@@ -13,7 +13,16 @@ interface Props {
   /** Leave or delete. Rendered as a bubble anchored to the card. */
   onDelete(): void | Promise<void>;
   /** Cover first, then up to two more for the cards stacked behind it. */
-  covers: (string | null)[];
+  /**
+   * Cover plus up to two behind it, each carrying the storage path it came
+   * from as well as its signed URL.
+   *
+   * The path is what makes these cacheable. A signed URL is re-issued with a
+   * fresh token every time the roll is read, so using it as the cache key means
+   * every visit is a fresh key and a fresh download of a photograph that has
+   * not changed since it was developed. The path never changes.
+   */
+  covers: { url: string | null; path: string }[];
   /**
    * The cover's shape, from its stored dimensions. Only a hint — the image
    * corrects it on load, the same way the album's prints do.
@@ -35,6 +44,10 @@ const PEEK = 9; // How far each card behind the cover shows above it.
  */
 export function AlbumCard({ roll, covers, coverAspect, onDelete, onPress }: Props) {
   const [cover, second, third] = covers;
+  // The slivers fall back to whatever is available, so a roll with one frame
+  // still reads as a stack rather than a lone card.
+  const near = second ?? cover;
+  const far = third ?? second ?? cover;
 
   // The stored dimensions are a hint; frames shot before the capture pipeline
   // recorded them have none at all. The decoded image reports the truth.
@@ -65,30 +78,33 @@ export function AlbumCard({ roll, covers, coverAspect, onDelete, onPress }: Prop
     >
       {/* Furthest back, narrowest — drawn first so it sits lowest. */}
       <View style={[styles.behind, styles.behindFar]}>
-        {third || second || cover ? (
+        {far?.url ? (
           <Image
-            source={{ uri: (third ?? second ?? cover)! }}
+            source={{ uri: far.url, cacheKey: far.path }}
             style={styles.behindImage}
             contentFit="cover"
+            cachePolicy="memory-disk"
           />
         ) : null}
       </View>
 
       <View style={[styles.behind, styles.behindNear]}>
-        {second || cover ? (
+        {near?.url ? (
           <Image
-            source={{ uri: (second ?? cover)! }}
+            source={{ uri: near.url, cacheKey: near.path }}
             style={styles.behindImage}
             contentFit="cover"
+            cachePolicy="memory-disk"
           />
         ) : null}
       </View>
 
       <View style={styles.card}>
         <View style={[styles.photoWrap, { aspectRatio: aspect }]}>
-          {cover ? (
+          {cover?.url ? (
             <Image
-              source={{ uri: cover }}
+              source={{ uri: cover.url, cacheKey: cover.path }}
+              cachePolicy="memory-disk"
               style={styles.photo}
               // The box is the photograph's own shape, so `cover` scales it to
               // fit exactly and takes nothing off any edge.

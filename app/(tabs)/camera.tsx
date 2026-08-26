@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions, type CameraType } from 'expo-camera';
 import * as Device from 'expo-device';
+import * as Haptics from 'expo-haptics';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -18,12 +19,15 @@ import Animated, {
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
+  withDelay,
   withTiming,
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Close } from '@/components/Aperture';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+
+import { Close, FlipGlyph } from '@/components/Aperture';
 import { CARTRIDGE_ROW_HEIGHT, Cartridges } from '@/components/Cartridges';
 import { usePillHeight, useTabPillClearance } from '@/components/TabPill';
 import { FilmStrip, useFilmMetrics, type FilmStripHandle } from '@/components/FilmStrip';
@@ -77,6 +81,18 @@ export default function CameraTab() {
   const [permission, requestPermission] = useCameraPermissions();
   const [shooting, setShooting] = useState(false);
   const [cameraActive, setCameraActive] = useState(true);
+
+  /** Which way the camera looks. Not remembered between visits — a roll is shot
+   *  outward far more often than inward, so back is the right thing to return to. */
+  const [facing, setFacing] = useState<CameraType>('back');
+
+  /**
+   * Zoom, as expo-camera wants it: a fraction of this device's maximum, applied
+   * natively as `deviceMax ^ zoom`. Reset on a flip, because the front camera's
+   * range is a different range and carrying a fraction across means arriving at
+   * an arbitrary magnification.
+   */
+  const [zoom, setZoom] = useState(0);
 
   const { data: rolls, isLoading } = useQuery({
     queryKey: ['active-rolls'],
@@ -211,6 +227,72 @@ export default function CameraTab() {
   const commitAdvance = useCallback(() => {
     setExposed((n) => (n === null ? n : n + 1));
   }, []);
+
+  /**
+   * Pinch to zoom, over the viewfinder itself.
+   *
+   * Linear in the fraction, which is exponential in magnification — that is
+   * what the native mapping does with it, and it is also what a pinch should
+   * feel like: the same spread of the fingers doubles what you see, wherever
+   * you started.
+   *
+   * The fraction lives in a shared value so the gesture can run on the UI
+   * thread, and only crosses to React when it has moved enough to matter.
+   * Setting state on every frame of a pinch re-renders the film strip, the
+   * cartridges and the base sixty times a second to change one number.
+   */
+  const pinchFrom = useSharedValue(0);
+  const lastSent = useSharedValue(0);
+
+  /**
+   * The readout's own opacity.
+   *
+   * There is no persistent zoom control on the frame — the picture is the
+   * screen, and a barrel or a scale would sit on top of it for the whole time
+   * it was not being used. This appears while the fingers are moving and goes
+   * again shortly after, which is the only moment the number is worth anything.
+   */
+  const readout = useSharedValue(0);
+
+  const pinch = Gesture.Pinch()
+    .onStart(() => {
+      'worklet';
+      pinchFrom.set(lastSent.get());
+      readout.set(withTiming(1, { duration: 120 }));
+    })
+    .onUpdate((e) => {
+      'worklet';
+      // Log of the pinch scale, so pinching out and back in returns to where
+      // it began rather than drifting.
+      const next = pinchFrom.get() + Math.log(e.scale) / Math.log(8);
+      const clamped = Math.min(1, Math.max(0, next));
+      // Half-percent steps: finer than anyone can see, coarse enough that a
+      // full sweep costs two hundred renders rather than thousands.
+      const stepped = Math.round(clamped * 200) / 200;
+      if (stepped === lastSent.get()) return;
+      lastSent.set(stepped);
+      scheduleOnRN(setZoom, stepped);
+    })
+    .onFinalize(() => {
+      'worklet';
+      readout.set(withDelay(900, withTiming(0, { duration: 320 })));
+    });
+
+  const readoutStyle = useAnimatedStyle(() => ({ opacity: readout.get() }));
+
+  const toZoom = useCallback(
+    (z: number) => {
+      lastSent.set(z);
+      setZoom(z);
+    },
+    [lastSent],
+  );
+
+  function flip() {
+    Haptics.selectionAsync().catch(() => {});
+    setFacing((f) => (f === 'back' ? 'front' : 'back'));
+    toZoom(0);
+  }
 
   async function capture() {
     if (!shown || exposed === null || shooting) return;
@@ -416,24 +498,45 @@ export default function CameraTab() {
             stock={filterById(shown?.filter).label.toUpperCase()}
           >
             {HAS_CAMERA ? (
-              <CameraView
-                ref={camera}
-                style={StyleSheet.absoluteFill}
-                facing="back"
-                active={cameraActive}
-                // The app is portrait-locked (app.json), so without this the
-                // camera reports every frame as portrait-shaped no matter how
-                // the phone was actually turned — a landscape shot would come
-                // back with width/height swapped to match the locked UI, not
-                // the hand holding it.
-                responsiveOrientationWhenOrientationLocked
-                // The film strip's own freeze/wind/reveal *is* the shutter
-                // feedback (§FilmStrip.advance). The native flash defaults on
-                // and fires on its own clock, unsynced with that sequence —
-                // which is the white flash landing at some arbitrary point
-                // after the frame has already changed.
-                animateShutter={false}
-              />
+              <GestureDetector gesture={pinch}>
+                {/* Wrapped, because the detector takes one child and the
+                    readout has to sit over the picture rather than beside it. */}
+                <View style={StyleSheet.absoluteFill}>
+                <CameraView
+                  ref={camera}
+                  style={StyleSheet.absoluteFill}
+                  facing={facing}
+                  zoom={zoom}
+                  active={cameraActive}
+                  // The app is portrait-locked (app.json), so without this the
+                  // camera reports every frame as portrait-shaped no matter how
+                  // the phone was actually turned — a landscape shot would come
+                  // back with width/height swapped to match the locked UI, not
+                  // the hand holding it.
+                  responsiveOrientationWhenOrientationLocked
+                  // The film strip's own freeze/wind/reveal *is* the shutter
+                  // feedback (§FilmStrip.advance). The native flash defaults on
+                  // and fires on its own clock, unsynced with that sequence —
+                  // which is the white flash landing at some arbitrary point
+                  // after the frame has already changed.
+                  animateShutter={false}
+                />
+
+                {/* Per cent of the lens's travel, not a magnification. The
+                    factor at any point depends on a device maximum the camera
+                    library never reports, so a number with an × after it would
+                    be a guess wearing a uniform. This says where along the
+                    range you are, which is true everywhere. */}
+                <Animated.View
+                  style={[styles.readout, readoutStyle]}
+                  pointerEvents="none"
+                >
+                  <Text style={styles.readoutText}>
+                    {zoom === 0 ? 'WIDE' : `ZOOM ${Math.round(zoom * 100)}%`}
+                  </Text>
+                </Animated.View>
+                </View>
+              </GestureDetector>
             ) : (
               <View style={[StyleSheet.absoluteFill, styles.noCamera]}>
                 <Text style={styles.noCameraText}>No camera on a simulator</Text>
@@ -475,17 +578,38 @@ export default function CameraTab() {
       >
         <Cartridges rolls={active} selectedId={roll?.id ?? null} onSelect={load} />
 
-        <Pressable
-          onPress={capture}
-          disabled={shooting}
-          style={({ pressed }) => [styles.shutter, pressed && styles.shutterPressed]}
-          accessibilityRole="button"
-          accessibilityLabel="Take a frame"
-        >
-          <View style={styles.shutterInner}>
-            {shooting && <ActivityIndicator color={colors.filmBase} size="small" />}
-          </View>
-        </Pressable>
+        {/* The shutter keeps the screen's own axis and the flip sits off to one
+            side of it, rather than the two sharing a row and pushing the
+            shutter off-centre. A shutter that moves because a second control
+            appeared beside it is a shutter you have to look for. */}
+        <View style={styles.shutterRow}>
+          <Pressable
+            onPress={capture}
+            disabled={shooting}
+            style={({ pressed }) => [styles.shutter, pressed && styles.shutterPressed]}
+            accessibilityRole="button"
+            accessibilityLabel="Take a frame"
+          >
+            <View style={styles.shutterInner}>
+              {shooting && <ActivityIndicator color={colors.filmBase} size="small" />}
+            </View>
+          </Pressable>
+
+          {HAS_CAMERA ? (
+            <Pressable
+              onPress={flip}
+              disabled={shooting}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel={
+                facing === 'back' ? 'Switch to the front camera' : 'Switch to the back camera'
+              }
+              style={({ pressed }) => [styles.flip, pressed && styles.shutterPressed]}
+            >
+              <FlipGlyph size={38} color={colors.filmBaseInk} />
+            </Pressable>
+          ) : null}
+        </View>
         <Text style={styles.note}>PHOTOS WILL BE HIDDEN UNTIL THE ROLL IS FULL</Text>
       </View>
     </Animated.View>
@@ -575,6 +699,40 @@ const styles = StyleSheet.create({
     // stays low under the thumb whatever height the frame above resolves to.
     justifyContent: 'flex-end',
     gap: space.sm,
+  },
+  // The shutter is centred in this row and the flip is taken out of the flow
+  // beside it, so adding or removing the flip cannot shift the shutter.
+  shutterRow: { alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' },
+  flip: {
+    position: 'absolute',
+    // Far enough out to clear the shutter's 62pt and still sit well inside the
+    // screen edge on the narrowest phone.
+    right: '15%',
+    // Deliberately just under the shutter's 62. Matching it would make two
+    // equal circles and leave the eye to work out which one takes the picture;
+    // a clear step down says which is the instrument and which is the setting.
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  readout: {
+    position: 'absolute',
+    bottom: space.md,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.25)',
+    borderRadius: 999,
+    paddingHorizontal: 13,
+    paddingVertical: 5,
+  },
+  readoutText: {
+    fontFamily: fonts.mono,
+    fontSize: 10,
+    letterSpacing: 1.4,
+    color: colors.onDark,
   },
   shutter: {
     width: 62,
