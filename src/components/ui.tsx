@@ -15,7 +15,15 @@ import { colors, fonts, radius, space } from '@/theme';
 
 /* ------------------------------------------------------------------ button */
 
-type ButtonVariant = 'accent' | 'dark' | 'ghost' | 'text';
+/**
+ * `danger` is a ghost carrying red ink, not a red button.
+ *
+ * A filled red pill would be the loudest thing on a screen whose whole job is
+ * to be quiet, and it would sit under Sign out as though the two were a pair of
+ * equal offers. Same shape and same weight as its neighbour, with the colour
+ * doing the warning — the confirmation dialog is what actually guards the act.
+ */
+type ButtonVariant = 'accent' | 'dark' | 'ghost' | 'text' | 'danger';
 
 /** Width reserved either side of a label so it can never reach the mark. */
 const ICON_SLOT = 32;
@@ -50,6 +58,7 @@ export function Button({
         variant === 'accent' && styles.btnAccent,
         variant === 'dark' && styles.btnDark,
         variant === 'ghost' && styles.btnGhost,
+        variant === 'danger' && styles.btnGhost,
         variant === 'text' && styles.btnText,
         pressed && styles.btnPressed,
         isDisabled && styles.btnDisabled,
@@ -67,6 +76,7 @@ export function Button({
               styles.btnLabel,
               (variant === 'accent' || variant === 'dark') && styles.btnLabelOnDark,
               variant === 'text' && styles.btnLabelQuiet,
+              variant === 'danger' && styles.btnLabelDanger,
               // Symmetric, so the label stays centred on the button while still
               // being unable to run underneath the mark.
               icon != null && styles.btnLabelBesideIcon,
@@ -216,6 +226,7 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
   },
   btnText: { backgroundColor: 'transparent', paddingVertical: 10, minHeight: 0 },
+  btnLabelDanger: { color: colors.danger },
   btnPressed: { opacity: 0.82 },
   btnDisabled: { opacity: 0.4 },
   btnLabel: {

@@ -29,7 +29,7 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
 import { Close, FlipGlyph } from '@/components/Aperture';
 import { CARTRIDGE_ROW_HEIGHT, Cartridges } from '@/components/Cartridges';
-import { usePillHeight, useTabPillClearance } from '@/components/TabPill';
+import { useCameraKnobOrigin, useTabPillClearance } from '@/components/TabPill';
 import { FilmStrip, useFilmMetrics, type FilmStripHandle } from '@/components/FilmStrip';
 import { Button } from '@/components/ui';
 import { fetchActiveRolls, shootFrame } from '@/lib/api';
@@ -135,23 +135,26 @@ export default function CameraTab() {
   const shown = active.find((r) => r.id === shownId) ?? roll;
 
   const { width: screenW, height: screenH } = useWindowDimensions();
-  const pillH = usePillHeight();
   // The bar is on screen for the empty state — it is the only way off it —
   // so that state has to keep its buttons clear of the bar.
   const pillClearance = useTabPillClearance();
   const reduced = useReducedMotion();
 
-  // Camera is the middle tab, so its icon sits on the screen's own vertical
-  // axis — only the height has to be worked out.
-  const originY = screenH - Math.max(insets.bottom, space.lg) - pillH / 2;
+  // The knob stands apart from the pill at the dock's right end, so the screen
+  // has to travel on both axes to keep that point fixed — asked of the dock
+  // rather than worked out here, since it is the dock's own geometry.
+  const origin = useCameraKnobOrigin();
 
   const open = useSharedValue(0);
   const openStyle = useAnimatedStyle(() => {
     const t = open.get();
+    // Translate before scale: reversed, the offset would itself be scaled and
+    // the screen would arrive from the wrong place.
     return {
       opacity: t,
       transform: [
-        { translateY: (originY - screenH / 2) * (1 - t) },
+        { translateX: (origin.x - screenW / 2) * (1 - t) },
+        { translateY: (origin.y - screenH / 2) * (1 - t) },
         { scale: OPEN_FROM + (1 - OPEN_FROM) * t },
       ],
     };

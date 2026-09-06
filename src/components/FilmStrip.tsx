@@ -42,6 +42,10 @@ const SMOOTH = Easing.bezier(0.4, 0, 0.2, 1);
 
 export interface FilmMetrics {
   perfW: number;
+  /** The hole itself. Narrower than the column that carries it. */
+  holeW: number;
+  /** Air between the screen edge and the hole. The only thing outside it. */
+  perfPad: number;
   coreW: number;
   frameH: number;
   rebateH: number;
@@ -64,7 +68,22 @@ export function useFilmMetrics(extraFoot = 0): FilmMetrics {
   const insets = useSafeAreaInsets();
 
   return useMemo(() => {
-    const perfW = Math.round(width * 0.068);
+    // The punched edge, measured as three things rather than one column: air at
+    // the screen edge, the hole, and the little that is left before the frame.
+    //
+    // Holes sit hard against that outer air rather than centred in a column,
+    // which is what lets the column be barely wider than a hole at all. Centred,
+    // the same hole demands padding on both sides of itself and the frame pays
+    // for the half it never sees.
+    //
+    // Narrower than real 35mm throughout, deliberately: on actual film each
+    // punched edge takes about a sixth of the width, and at anything near that
+    // the holes become the subject while the picture gets what is left. The
+    // strip only has to *say* film, and a slim edge still says it.
+    const perfPad = Math.max(4, Math.round(width * 0.013));
+    const holeW = Math.round(width * 0.024);
+    // Just enough that a hole never touches the frame it runs beside.
+    const perfW = perfPad + holeW + Math.max(2, Math.round(width * 0.006));
     const coreW = width - perfW * 2;
     const rebateH = 30;
     const headerH = 64;
@@ -96,6 +115,8 @@ export function useFilmMetrics(extraFoot = 0): FilmMetrics {
 
     return {
       perfW,
+      holeW,
+      perfPad,
       coreW,
       rebateH,
       headerH,
@@ -139,7 +160,7 @@ export const FilmStrip = forwardRef<FilmStripHandle, Props>(function FilmStrip(
   { metrics, exposed, onAdvanced, stock = 'SAVOUR 400', children },
   ref,
 ) {
-  const { perfW, coreW, frameH, rebateH, pitch, windowTop, freshTop } = metrics;
+  const { perfW, holeW, perfPad, coreW, frameH, rebateH, pitch, windowTop, freshTop } = metrics;
 
   const reduced = useReducedMotion();
 
@@ -259,7 +280,9 @@ export const FilmStrip = forwardRef<FilmStripHandle, Props>(function FilmStrip(
     return Array.from({ length: count }, (_, i) => i * perfPitch - pitch);
   }, [edgeH, pitch, perfPitch]);
 
-  const perfs = (
+  // Anchored to the outer edge of its own column, so the two runs of holes sit
+  // against the screen's left and right rather than floating in from them.
+  const perfsOn = (side: 'left' | 'right') => (
     <Animated.View style={[StyleSheet.absoluteFill, reelStyle]} pointerEvents="none">
       {holes.map((top) => (
         <View
@@ -267,8 +290,9 @@ export const FilmStrip = forwardRef<FilmStripHandle, Props>(function FilmStrip(
           style={{
             position: 'absolute',
             top,
-            alignSelf: 'center',
-            width: Math.round(perfW * 0.52),
+            left: side === 'left' ? perfPad : undefined,
+            right: side === 'right' ? perfPad : undefined,
+            width: holeW,
             height: Math.round(perfPitch * 0.42),
             borderRadius: 2.5,
             backgroundColor: colors.perf,
@@ -365,10 +389,10 @@ export const FilmStrip = forwardRef<FilmStripHandle, Props>(function FilmStrip(
       />
 
       <View style={[styles.perfCol, { left: 0, width: perfW, top: windowTop, height: edgeH }]}>
-        {perfs}
+        {perfsOn('left')}
       </View>
       <View style={[styles.perfCol, { right: 0, width: perfW, top: windowTop, height: edgeH }]}>
-        {perfs}
+        {perfsOn('right')}
       </View>
     </View>
   );

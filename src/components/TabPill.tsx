@@ -1,6 +1,7 @@
 import * as Haptics from 'expo-haptics';
 import type { TabTriggerSlotProps } from 'expo-router/ui';
 import React, {
+  Children,
   createContext,
   forwardRef,
   useCallback,
@@ -10,7 +11,14 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { Pressable, StyleSheet, View, useWindowDimensions, type ViewProps } from 'react-native';
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+  type ViewProps,
+} from 'react-native';
 import Animated, {
   Easing,
   useAnimatedReaction,
@@ -23,16 +31,18 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { scheduleOnRN } from 'react-native-worklets';
 
 import type { IconProps } from './Aperture';
-import { colors, radius, space } from '@/theme';
+import { colors, fonts, radius, space } from '@/theme';
 
-/** The pill stands one fifteenth of the screen tall, whatever the device. */
-const SCREEN_FRACTION = 1 / 15;
+/** The dock stands one twelfth of the screen tall, whatever the device. */
+const SCREEN_FRACTION = 1 / 13;
 
 /**
- * Height of the pill: the tab's own height plus the track around it.
+ * Height of the dock: a tab's own height plus the track around it.
  *
  * Taken from the window rather than fixed, so the bar holds the same share of
- * a small phone as a large one instead of dominating the short screen.
+ * a small phone as a large one instead of dominating the short screen. Bigger
+ * than it was when the pill carried icons alone — a caption now sits under
+ * each glyph, and the row needs the extra headroom to set it without cramping.
  */
 export function usePillHeight(): number {
   const { height } = useWindowDimensions();
@@ -51,13 +61,11 @@ export function usePillHeight(): number {
  */
 const TRACK = 6;
 
-/**
- * Icon size.
- *
- * Larger now that it stands alone: with a label beside it the glyph was the
- * quieter half, and without one it has to carry the tab by itself.
- */
-const ICON = 23;
+/** Icon size. Sized to sit above a caption rather than to carry the tab alone. */
+const ICON = 20;
+
+/** The camera button's glyph. A touch larger: it has no caption to share the eye with. */
+const KNOB_ICON = 23;
 
 /** Inactive ink: the pill's white, turned down. Never a second colour. */
 const DIM = 'rgba(255,255,255,0.62)';
@@ -89,12 +97,36 @@ const HAND_OVER_AT = 1;
 
 /**
  * How much bottom padding a scrollable screen needs to read its last row out
- * from under the pill. A floating bar buys back the full-width tab bar's strip
+ * from under the dock. A floating bar buys back the full-width tab bar's strip
  * of screen, but only if every list pays this back at the bottom.
  */
 export function useTabPillClearance(): number {
   const insets = useSafeAreaInsets();
   return Math.max(insets.bottom, space.lg) + usePillHeight() + space.md;
+}
+
+/**
+ * Where the camera knob's centre sits on screen.
+ *
+ * Lives here rather than in the screen that opens from it, because it is the
+ * dock's own geometry: the knob is the last child of a row inset by `space.lg`
+ * on both sides, so its right edge is the dock's right edge and it is as wide
+ * as the dock is tall. A screen recomputing that from its own constants goes
+ * quietly wrong the moment the dock is rearranged — which is exactly what
+ * happened when the camera stopped being the middle tab and moved out of the
+ * pill, leaving the viewfinder growing from the bottom centre of the screen
+ * where nothing had been for some time.
+ */
+export function useCameraKnobOrigin(): { x: number; y: number } {
+  const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const pillH = usePillHeight();
+  const bottom = Math.max(insets.bottom, space.lg);
+
+  return useMemo(
+    () => ({ x: width - space.lg - pillH / 2, y: height - bottom - pillH / 2 }),
+    [width, height, bottom, pillH],
+  );
 }
 
 /* ------------------------------------------------------------------ context */
@@ -129,19 +161,6 @@ const Ctx = createContext<PillContext | null>(null);
 
 /* ---------------------------------------------------------------- container */
 
-interface PillBarProps extends ViewProps {
-  /** Distance from the bottom of the screen, safe area already accounted for. */
-  bottom: number;
-  /**
-   * Take the bar off the screen without unmounting it.
-   *
-   * It cannot simply not be rendered: `TabList`'s children are what declare the
-   * routes, so dropping them drops the tabs themselves. Hidden, the triggers
-   * still exist and the navigator still knows about every screen.
-   */
-  hidden?: boolean;
-}
-
 /**
  * The floating pill, and the thumb that travels between its tabs.
  *
@@ -157,8 +176,11 @@ interface PillBarProps extends ViewProps {
  * The tabs sit flush, with no black between them, so the thumb's trailing edge
  * on one tab is exactly its leading edge on the next. The white travels as one
  * continuous move rather than crossing a gap and landing again.
+ *
+ * Not exported: it only ever appears as `TabDock`'s inner group, which is what
+ * gives it its width and its place on screen.
  */
-export function PillBar({ bottom, hidden, children, style, ...rest }: PillBarProps) {
+function PillBar({ children }: { children: React.ReactNode }) {
   const reduced = useReducedMotion();
 
   const [metrics, setMetrics] = useState<Record<number, Metrics>>({});
@@ -262,11 +284,7 @@ export function PillBar({ bottom, hidden, children, style, ...rest }: PillBarPro
 
   return (
     <Ctx.Provider value={value}>
-      <View
-        {...rest}
-        pointerEvents={hidden ? 'none' : 'auto'}
-        style={[style, styles.pill, { bottom }, hidden && styles.hidden]}
-      >
+      <View style={styles.pill}>
         {target ? <Animated.View style={[styles.thumb, thumbStyle]} pointerEvents="none" /> : null}
         {children}
       </View>
@@ -274,29 +292,71 @@ export function PillBar({ bottom, hidden, children, style, ...rest }: PillBarPro
   );
 }
 
+/* --------------------------------------------------------------------- dock */
+
+interface TabDockProps extends ViewProps {
+  /** Distance from the bottom of the screen, safe area already accounted for. */
+  bottom: number;
+  /**
+   * Take the dock off the screen without unmounting it.
+   *
+   * It cannot simply not be rendered: `TabList`'s children are what declare the
+   * routes, so dropping them drops the tabs themselves. Hidden, the triggers
+   * still exist and the navigator still knows about every screen.
+   */
+  hidden?: boolean;
+  /**
+   * How many of the leading children ride in the pill together. The rest — in
+   * practice, one — stand apart as their own circle.
+   *
+   * A count rather than a marker on the odd child out, because the thing the
+   * parser needs from this component is its `children` prop left untouched as
+   * a flat, ordered list: `TabList` reads that list straight off this
+   * component to learn what routes exist, before this ever renders. Splitting
+   * children out into named props (a `pill` group and a `detached` one) would
+   * hide the detached trigger from that reading — the route would exist for
+   * navigation but never surface as a tab.
+   */
+  groupSize: number;
+}
+
+/**
+ * The pill, and the camera's own circle standing apart from it.
+ *
+ * The Action Button's target is one link, not a tab, and the two things it
+ * ever chooses between — a viewfinder, a shelf of rolls — already have their
+ * places in the pill. Giving the shutter a fifth slot inside that row would
+ * make it look like a destination among equals; standing alone is what says
+ * *this one just fires*.
+ */
+export function TabDock({ bottom, hidden, groupSize, children, style, ...rest }: TabDockProps) {
+  const items = Children.toArray(children);
+  const grouped = items.slice(0, groupSize);
+  const detached = items.slice(groupSize);
+
+  return (
+    <View
+      {...rest}
+      pointerEvents={hidden ? 'none' : 'auto'}
+      style={[style, styles.dock, { bottom }, hidden && styles.hidden]}
+    >
+      <PillBar>{grouped}</PillBar>
+      {detached}
+    </View>
+  );
+}
+
 /* --------------------------------------------------------------------- tab */
 
 type PillTabProps = TabTriggerSlotProps & {
-  /** Position in the bar. The thumb travels to the focused tab's index. */
+  /** Position in the pill. The thumb travels to the focused tab's index. */
   index: number;
-  /**
-   * The tab's name. Not drawn — the bar is glyphs only — but it is what a
-   * screen reader announces, so it is required rather than decorative.
-   */
   label: string;
   icon: React.ComponentType<IconProps>;
-  /**
-   * Take this tab off the bar without unmounting it.
-   *
-   * The trigger has to stay: `TabList`'s children are what declare the routes,
-   * so dropping one drops the screen with it. Hidden, the route still exists
-   * and the remaining tabs divide the bar between them.
-   */
-  hidden?: boolean;
 };
 
 export const PillTab = forwardRef<View, PillTabProps>(function PillTab(
-  { index, label, icon: Icon, isFocused, onPress, hidden, style: slotStyle, ...rest },
+  { index, label, icon: Icon, isFocused, onPress, style: slotStyle, ...rest },
   ref,
 ) {
   const ctx = useContext(Ctx);
@@ -313,8 +373,10 @@ export const PillTab = forwardRef<View, PillTabProps>(function PillTab(
   const focus = ctx?.focus;
 
   useEffect(() => {
-    if (isFocused && !hidden) focus?.(index);
-  }, [isFocused, hidden, index, focus]);
+    if (isFocused) focus?.(index);
+  }, [isFocused, index, focus]);
+
+  const tint = selected ? colors.ink : DIM;
 
   return (
     <Pressable
@@ -326,9 +388,6 @@ export const PillTab = forwardRef<View, PillTabProps>(function PillTab(
       accessibilityLabel={label}
       accessibilityState={{ selected }}
       onLayout={(event) => {
-        // A hidden tab measures zero. Reporting that would give the thumb a
-        // target with no width to travel to.
-        if (hidden) return;
         const { x, width } = event.nativeEvent.layout;
         ctx?.report(index, { x, width });
       }}
@@ -353,24 +412,83 @@ export const PillTab = forwardRef<View, PillTabProps>(function PillTab(
         typeof slotStyle === 'function' ? slotStyle(state) : slotStyle,
         styles.tab,
         { minHeight: pillH - TRACK * 2 },
-        hidden && styles.tabHidden,
         state.pressed && !selected && styles.tabPressed,
       ]}
     >
-      <Icon size={ICON} color={selected ? colors.ink : DIM} />
+      <Icon size={ICON} color={tint} />
+      <Text style={[styles.tabLabel, { color: tint }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+});
+
+/* -------------------------------------------------------------------- knob */
+
+type CameraKnobProps = TabTriggerSlotProps & {
+  label: string;
+  icon: React.ComponentType<IconProps>;
+  /**
+   * Take the circle off the dock without unmounting it.
+   *
+   * With no film to shoot into, the shortcut has nowhere useful to send you —
+   * `shoot.tsx` already sends the Action Button to the shelf instead, and a
+   * circle that opens an empty viewfinder here would just be a second, worse
+   * way to reach the same dead end. Hidden rather than absent so the trigger
+   * still declares the route; the pill fills the width this leaves behind.
+   */
+  hidden?: boolean;
+};
+
+/**
+ * The shutter, standing apart from the pill as its own black circle.
+ *
+ * No caption under this one and no dimming when it is not the focused route —
+ * it is not a member of the set the thumb travels between, so it never reads
+ * as unselected. It is a button, not a tab, and looks like one.
+ */
+export const CameraKnob = forwardRef<View, CameraKnobProps>(function CameraKnob(
+  { label, icon: Icon, hidden, onPress, style: slotStyle, ...rest },
+  ref,
+) {
+  const pillH = usePillHeight();
+
+  return (
+    <Pressable
+      {...rest}
+      ref={ref}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={(event) => {
+        Haptics.selectionAsync().catch(() => {});
+        onPress?.(event);
+      }}
+      style={(state) => [
+        typeof slotStyle === 'function' ? slotStyle(state) : slotStyle,
+        styles.knob,
+        { width: pillH, height: pillH, borderRadius: pillH / 2 },
+        hidden && styles.hidden,
+        state.pressed && styles.tabPressed,
+      ]}
+    >
+      <Icon size={KNOB_ICON} color={colors.paper} />
     </Pressable>
   );
 });
 
 const styles = StyleSheet.create({
-  pill: {
+  dock: {
     position: 'absolute',
-    // Full width rather than hugging its contents. A pill sized by its tabs was
-    // right at two — two items leave a full-width bar looking sparse — but at
-    // three they fill one honestly, and equal thirds stop a long label from
-    // deciding how much room its neighbours get.
     left: space.lg,
     right: space.lg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+  },
+  hidden: { display: 'none' },
+
+  pill: {
+    flex: 1,
     flexDirection: 'row',
     padding: TRACK,
     borderRadius: radius.pill,
@@ -385,8 +503,6 @@ const styles = StyleSheet.create({
   },
   // Left stays 0: translateX carries the position, and a tab's reported x is
   // already relative to this same padding box.
-  hidden: { display: 'none' },
-  tabHidden: { display: 'none' },
   thumb: {
     position: 'absolute',
     left: 0,
@@ -397,12 +513,13 @@ const styles = StyleSheet.create({
   },
 
   tab: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 3,
     // Equal thirds. The thumb takes its width from whichever tab is focused,
     // so tabs sized by their own labels give a thumb that grows and shrinks as
-    // it travels — "Camera" is wider than "Film", and it showed.
+    // it travels — "Profile" is wider than "Film", and it showed.
     //
     // Not shrinkable beyond that: letting a tab compress is what once cropped
     // its own label inside the thumb.
@@ -410,5 +527,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
     borderRadius: radius.pill,
   },
+  tabLabel: {
+    fontFamily: fonts.mono,
+    fontSize: 9,
+    letterSpacing: 1.1,
+  },
   tabPressed: { opacity: 0.6 },
+
+  knob: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.ink,
+    shadowColor: '#000',
+    shadowOpacity: 0.26,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 8,
+  },
 });

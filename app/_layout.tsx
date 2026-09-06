@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister';
 import { QueryClient, focusManager } from '@tanstack/react-query';
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
+import { setAudioModeAsync } from 'expo-audio';
 import { useFonts } from 'expo-font';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -27,6 +28,25 @@ import { useRollSync } from '@/lib/useRollSync';
 import { colors } from '@/theme';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
+
+/**
+ * Sound has to survive the ringer switch.
+ *
+ * iOS silences an app's audio outright when the phone is on silent, and
+ * `playsInSilentMode` defaults to false — so the printer running as a roll
+ * develops simply never happened for anyone who keeps their phone muted, which
+ * is most people. It failed without an error, because there is no error: the
+ * session is doing exactly what it was configured to do.
+ *
+ * True here rather than around the one sound that exists today, because it is a
+ * decision about the app and not about a clip: everything Savour will ever play
+ * is a short, deliberate response to something the person just did, and none of
+ * it is music that a muted phone is trying to spare them.
+ *
+ * `shouldPlayInBackground` stays false — the sound belongs to a screen, and
+ * carrying on after the app is gone would be a bug in the other direction.
+ */
+setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: false }).catch(() => {});
 
 /** How long a written-down answer is worth reading back. */
 const PERSIST_MAX_AGE = 24 * 60 * 60 * 1000;
@@ -262,6 +282,9 @@ function RouteGuard() {
       <Stack.Screen name="paywall" options={{ presentation: 'modal' }} />
       {/* Reachable before there is an account, which is the whole point of it. */}
       <Stack.Screen name="terms" options={{ presentation: 'modal' }} />
+      {/* Where `savour://shoot` lands. No animation: it decides and forwards,
+          and a transition onto a screen nobody sees is a transition too many. */}
+      <Stack.Screen name="shoot" options={{ animation: 'none' }} />
     </Stack>
   );
 }

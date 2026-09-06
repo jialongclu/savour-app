@@ -125,7 +125,10 @@ export default function ProfileTab() {
 
         <Button title="Sign out" variant="ghost" onPress={signOut} style={{ marginTop: space.xl }} />
 
-        <Pressable
+        <Button
+          title={remove.isPending ? 'Deleting…' : 'Delete account'}
+          variant="danger"
+          disabled={remove.isPending}
           onPress={() =>
             Alert.alert(
               'Delete account',
@@ -141,13 +144,8 @@ export default function ProfileTab() {
               ],
             )
           }
-          disabled={remove.isPending}
-          style={styles.deleteRow}
-        >
-          <Text style={[styles.delete, remove.isPending && styles.deleteBusy]}>
-            {remove.isPending ? 'Deleting…' : 'Delete account'}
-          </Text>
-        </Pressable>
+          style={styles.delete}
+        />
       </ScrollView>
     </SafeAreaView>
   );
@@ -176,7 +174,7 @@ const styles = StyleSheet.create({
   },
   rowLabel: { fontFamily: fonts.serif, fontSize: 16, color: colors.ink },
   action: { fontFamily: fonts.serifSemi, fontSize: 14, color: colors.accent },
-  deleteRow: { alignItems: 'center', paddingVertical: space.xl },
-  delete: { fontFamily: fonts.serifSemi, fontSize: 14, color: colors.danger },
-  deleteBusy: { color: colors.muted },
+  // Close under Sign out rather than exiled to the bottom of the scroll: the
+  // two are both ways of leaving, and the dialog is what guards the harder one.
+  delete: { marginTop: space.sm },
 });

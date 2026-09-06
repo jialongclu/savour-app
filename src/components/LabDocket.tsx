@@ -123,7 +123,26 @@ export function LabDocket({
 
     // Released with the paper's first step, wound to the point that leaves
     // exactly the animation's length before the tear.
-    player.seekTo(AUDIO_FROM_S).then(() => player.play()).catch(() => {});
+    //
+    // The wind and the release are deliberately not chained. `useAudioPlayer`
+    // loads asynchronously, and this fires the moment the paper is measured —
+    // often before a nine-second clip is ready — so `seekTo` can reject. Chained,
+    // that rejection took `play` down with it and the docket printed in silence;
+    // now a failed wind only costs the run-up, and the printer is still heard.
+    (async () => {
+      try {
+        await player.seekTo(AUDIO_FROM_S);
+      } catch {
+        // Not wound back: it starts from wherever it is rather than not at all.
+      }
+      try {
+        player.play();
+      } catch (e) {
+        // Genuinely unplayable. Worth saying so — this went unnoticed for a
+        // while precisely because every failure here was swallowed whole.
+        console.warn('[docket] the printer sound did not play', e);
+      }
+    })();
     timers.current.push(
       setTimeout(() => {
         try {

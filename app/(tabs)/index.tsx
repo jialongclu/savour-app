@@ -85,7 +85,7 @@ export default function Home() {
       qc.setQueryData<RollCard[]>(['finished-rolls'], (prev) =>
         (prev ?? []).filter((r) => r.id !== rollId),
       );
-      qc.invalidateQueries({ queryKey: ['finished-rolls'] }).catch(() => {});
+      qc.invalidateQueries({ queryKey: ['finished-rolls'] }).catch(() => { });
     },
     onError: (e: any) =>
       Alert.alert("Couldn't remove that album", e?.message ?? 'Please try again.'),
@@ -141,7 +141,7 @@ function EmptyState() {
     <View style={[styles.empty, { paddingBottom: pillClearance }]}>
       <Text style={styles.emptyTitle}>Nothing developed yet</Text>
       <Text style={styles.emptyBody}>
-        Rolls appear here once every shot is used. Shoot one, or join a friend&apos;s with their
+        Rolls appear here once every frame is used. Shoot one, or join a friend&apos;s with their
         code.
       </Text>
       <Button title="Open a roll" onPress={() => router.push('/roll/new')} style={styles.cta} />
